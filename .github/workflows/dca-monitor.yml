@@ -21,6 +21,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Garantir branch atualizada
+        run: |
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
@@ -41,12 +45,8 @@ jobs:
           git config user.name "GitHub Action Bot"
           git config user.email "actions@github.com"
 
-          # garante que está atualizado antes de commitar
-          git pull --rebase origin "${GITHUB_REF_NAME}" || true
-
           git add state.json || true
 
-          # só commita se tiver mudança
           if git diff --cached --quiet; then
             echo "Sem alterações em state.json"
             exit 0
