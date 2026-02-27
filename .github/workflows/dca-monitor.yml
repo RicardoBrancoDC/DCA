@@ -1,4 +1,4 @@
-name: Monitorar repercussão do DCA e enviar ao Telegram
+name: Monitorar repercussão da Defesa Civil e enviar ao Telegram
 
 on:
   schedule:
