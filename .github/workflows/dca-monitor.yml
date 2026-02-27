@@ -36,3 +36,8 @@ jobs:
           git add state.json || true
           git commit -m "Atualizar estado do monitor" || true
           git push || true
+
+      - name: Mostrar evento e hora
+        run: |
+          echo "event=${{ github.event_name }}"
+          date -u
