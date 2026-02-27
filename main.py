@@ -11,14 +11,15 @@ CHAT_ID = os.getenv("TELEGRAM_TO")
 
 STATE_FILE = "state.json"
 
-# Janela de tempo: últimas 24 horas (padrão). Você pode sobrescrever por variable no GitHub.
+# Ajustáveis por Variables do GitHub Actions (Settings > Secrets and variables > Actions > Variables)
 MAX_ENTRY_AGE_HOURS = int(os.getenv("MAX_ENTRY_AGE_HOURS", "24"))
-
-# Para não virar spam por execução
 MAX_SEND_PER_RUN = int(os.getenv("MAX_SEND_PER_RUN", "8"))
 SLEEP_SECONDS = float(os.getenv("SLEEP_SECONDS", "1.0"))
 
-# Termos explícitos do sistema
+# Prefixo das mensagens, para ficar com cara de plantão (CGMA / SEDEC etc)
+BOT_PREFIX = os.getenv("BOT_PREFIX", "CGMA").strip()
+
+# Termos explícitos do sistema (quando a matéria é sobre o DCA / Defesa Civil Alerta)
 EXPLICIT_PHRASES = [
     "defesa civil alerta",
     "defesa civil alerta (dca)",
@@ -41,23 +42,30 @@ DCA_CONTEXT_TERMS = [
 
 # Gatilhos de severidade (prioridade)
 SEVERITY_TRIGGERS = [
-    "morto", "mortos", "morte", "vítima", "vítimas", "vitima", "vitimas",
-    "ferido", "feridos", "desaparecido", "desaparecidos",
-    "soterrado", "soterrados", "tragédia", "tragedia",
-    "calamidade", "estado de calamidade", "emergência", "emergencia",
-    "interdição", "interdicao", "evacuação", "evacuacao",
+    "morto", "mortos", "morte",
+    "vítima", "vítimas", "vitima", "vitimas",
+    "ferido", "feridos",
+    "desaparecido", "desaparecidos",
+    "soterrado", "soterrados",
+    "tragédia", "tragedia",
+    "calamidade", "estado de calamidade",
+    "emergência", "emergencia",
+    "interdição", "interdicao",
+    "evacuação", "evacuacao",
 ]
 
-# Tags de ocorrência (só para ajudar o plantão a bater o olho)
+# Tags de ocorrência para ajudar o plantão a bater o olho
 EVENT_TAGS = {
     "ALAGAMENTO": ["alagamento", "alagamentos"],
-    "INUNDACAO": ["inundação", "inundacao", "enchente", "enchentes", "transbordamento"],
+    "INUNDACAO": ["inundação", "inundacao", "enchente", "enchentes", "transbordamento", "inundar", "inundou"],
     "ENXURRADA": ["enxurrada", "enxurradas"],
-    "DESLIZAMENTO": ["deslizamento", "deslizamentos", "desmoronamento", "desabamento", "queda de barreira", "desbarrancamento"],
-    "CHUVA_FORTE": ["chuva intensa", "chuva forte", "temporal", "tempestade"],
+    "DESLIZAMENTO": ["deslizamento", "deslizamentos", "desmoronamento", "desabamento", "queda de barreira", "soterramento", "desbarrancamento"],
+    "CHUVA_FORTE": ["chuva intensa", "chuva forte", "temporal", "tempestade", "chuvas fortes"],
 }
 
+# Buscas principais (Google News + Reddit)
 SEARCH_QUERIES = [
+    # repercussão do sistema
     '"Defesa Civil Alerta"',
     '"Defesa Civil Alerta" MIDR',
     '"DCA" "Defesa Civil"',
@@ -65,13 +73,13 @@ SEARCH_QUERIES = [
     '"Defesa Civil Alerta" "cell broadcast"',
     '"Defesa Civil Alerta" Anatel',
 
-    # ocorrências gerais (mídia) que podem interessar ao plantão
+    # ocorrências com possível impacto (plantão)
     '(alagamento OR inundação OR enchente OR enxurrada OR transbordamento) (vítimas OR mortos OR feridos OR desaparecidos)',
     '(deslizamento OR desmoronamento OR "queda de barreira" OR soterramento) (vítimas OR mortos OR feridos OR desaparecidos)',
 ]
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; DCA-monitor/1.2; +https://github.com/RicardoBrancoDC/DCA)"
+    "User-Agent": "Mozilla/5.0 (compatible; cgma-monitor/1.0; +https://github.com/RicardoBrancoDC/DCA)"
 }
 
 def log(msg: str):
@@ -114,14 +122,16 @@ def norm(s: str) -> str:
 def is_relevant(title: str, summary: str) -> bool:
     blob = f"{norm(title)} {norm(summary)}"
 
+    # 1) pegou termo explícito do sistema, ok
     if any(p in blob for p in EXPLICIT_PHRASES):
         return True
 
+    # 2) se vier "dca", exigir contexto
     has_dca = (" dca" in f" {blob}") or blob.startswith("dca")
     if has_dca:
         return any(ctx in blob for ctx in DCA_CONTEXT_TERMS)
 
-    # se cair em algum termo de ocorrência (alagamento/deslizamento) também aceitamos
+    # 3) se bater em termos de ocorrência, ok também
     for words in EVENT_TAGS.values():
         if any(w in blob for w in words):
             return True
@@ -132,27 +142,14 @@ def classify_tags(title: str, summary: str):
     blob = f"{norm(title)} {norm(summary)}"
     tags = []
 
-    # prioridade
     if any(t in blob for t in SEVERITY_TRIGGERS):
         tags.append("PRIO")
 
-    # evento
     for tag, words in EVENT_TAGS.items():
         if any(w in blob for w in words):
             tags.append(tag)
 
     return tags
-
-def google_news_rss(query: str) -> str:
-    q = quote_plus(query)
-    return f"https://news.google.com/rss/search?q={q}&hl=pt-BR&gl=BR&ceid=BR:pt-419"
-
-def reddit_search_rss(query: str) -> str:
-    q = quote_plus(query)
-    return f"https://www.reddit.com/search.rss?q={q}&sort=new"
-
-def stable_id(entry) -> str:
-    return entry.get("id") or entry.get("guid") or entry.get("link") or ""
 
 def entry_datetime_utc(entry):
     t = entry.get("published_parsed") or entry.get("updated_parsed")
@@ -163,8 +160,65 @@ def entry_datetime_utc(entry):
     except Exception:
         return None
 
+def stable_id(entry) -> str:
+    return entry.get("id") or entry.get("guid") or entry.get("link") or ""
+
 def label_source(source: str) -> str:
-    return "IMPRENSA" if source == "google_news" else "OPINIAO"
+    # gdelt conta como imprensa
+    if source in ("google_news", "gdelt"):
+        return "IMPRENSA"
+    return "OPINIAO"
+
+def google_news_rss(query: str) -> str:
+    q = quote_plus(query)
+    return f"https://news.google.com/rss/search?q={q}&hl=pt-BR&gl=BR&ceid=BR:pt-419"
+
+def reddit_search_rss(query: str) -> str:
+    q = quote_plus(query)
+    return f"https://www.reddit.com/search.rss?q={q}&sort=new"
+
+def gdelt_rss(gdelt_query: str) -> str:
+    # DOC API em RSS só funciona no modo ArtList
+    # timespan=24h garante recorte curto; e ainda fazemos checagem de data pelo RSS
+    q = quote_plus(gdelt_query)
+    return (
+        "https://api.gdeltproject.org/api/v2/doc/doc"
+        f"?query={q}"
+        "&mode=ArtList"
+        "&format=rss"
+        "&sort=DateDesc"
+        "&maxrecords=50"
+        "&timespan=24h"
+    )
+
+def build_feeds():
+    feeds = []
+
+    # Camada 1: Google News + Reddit, para todas as queries
+    for q in SEARCH_QUERIES:
+        feeds.append(("google_news", q, google_news_rss(q)))
+        feeds.append(("reddit", q, reddit_search_rss(q)))
+
+    # Camada 2: GDELT, com poucas queries bem “largas” (pra não ficar chamando demais)
+    # Importante: restringindo para imprensa do Brasil usando sourcecountry
+    gdelt_queries = [
+        # repercussão do sistema
+        '(("Defesa Civil Alerta" OR "cell broadcast" OR DCA) sourcecountry:brazil)',
+
+        # ocorrências com impacto, misturando português e inglês, porque a GDELT trabalha muito com tradução
+        '((alagamento OR enchente OR inundacao OR inundação OR transbordamento OR flood OR flooding OR inundation) '
+        '(vitimas OR vítimas OR mortos OR feridos OR desaparecidos OR victims OR dead OR deaths OR injured OR missing) '
+        'sourcecountry:brazil)',
+
+        '((deslizamento OR desmoronamento OR "queda de barreira" OR soterramento OR landslide) '
+        '(vitimas OR vítimas OR mortos OR feridos OR desaparecidos OR victims OR dead OR deaths OR injured OR missing) '
+        'sourcecountry:brazil)',
+    ]
+
+    for q in gdelt_queries:
+        feeds.append(("gdelt", q, gdelt_rss(q)))
+
+    return feeds
 
 def main():
     state = load_state()
@@ -175,13 +229,12 @@ def main():
 
     log(f"Iniciando. seen_ids={len(seen_ids)} seen_links={len(seen_links)} janela_horas={MAX_ENTRY_AGE_HOURS} max_send={MAX_SEND_PER_RUN}")
 
-    feeds = []
-    for q in SEARCH_QUERIES:
-        feeds.append(("google_news", q, google_news_rss(q)))
-        feeds.append(("reddit", q, reddit_search_rss(q)))
+    feeds = build_feeds()
 
     new_ids = []
     new_links = []
+    sent_links_this_run = set()
+
     sent = 0
     feed_ok = 0
     feed_fail = 0
@@ -193,45 +246,49 @@ def main():
 
             parsed = feedparser.parse(r.content)
             feed_ok += 1
-            log(f"[OK] {source} | query={q} | itens={len(parsed.entries)}")
+            log(f"[OK] {source} | itens={len(parsed.entries)} | query={q[:80]}")
 
             for entry in parsed.entries[:10]:
                 eid = stable_id(entry)
-                if not eid or eid in seen_ids or eid in new_ids:
+                if not eid:
+                    continue
+                if eid in seen_ids or eid in new_ids:
                     continue
 
                 title = entry.get("title", "")
                 summary = entry.get("summary", "") or entry.get("description", "")
                 link = entry.get("link", "")
 
-                # marca ID como visto, mesmo se não enviar
+                # marca id como visto, mesmo que não mande
                 new_ids.append(eid)
 
-                # 24h: se não tiver data confiável, não envia (evita item antigo escapando)
+                # janela: se não tiver data confiável, não manda (evita “coisa velha” escapando)
                 dt = entry_datetime_utc(entry)
-                if dt is None:
-                    continue
-                if dt < cutoff:
+                if dt is None or dt < cutoff:
                     continue
 
                 # não repetir link
-                if not link or link in seen_links or link in new_links:
+                if not link:
+                    continue
+                if link in seen_links or link in new_links or link in sent_links_this_run:
                     continue
 
                 if is_relevant(title, summary):
+                    src = label_source(source)
                     tags = classify_tags(title, summary)
                     tag_txt = " ".join([f"[{t}]" for t in tags]) if tags else ""
-                    src = label_source(source)
-                    msg = f"[{src}] {tag_txt} {title}\n{link}".strip()
 
+                    msg = f"[{BOT_PREFIX}] [{src}] {tag_txt} {title}\n{link}".strip()
                     send_telegram(msg)
+
                     sent += 1
                     new_links.append(link)
-                    log(f"[SEND] {src} | {', '.join(tags) if tags else 'SEM_TAG'} | {title[:120]}")
+                    sent_links_this_run.add(link)
+                    log(f"[SEND] {src} | {', '.join(tags) if tags else 'SEM_TAG'} | {title[:110]}")
                     time.sleep(SLEEP_SECONDS)
 
                     if sent >= MAX_SEND_PER_RUN:
-                        log(f"[LIMITE] Atingiu MAX_SEND_PER_RUN={MAX_SEND_PER_RUN}. Parando envios neste ciclo.")
+                        log(f"[LIMITE] MAX_SEND_PER_RUN={MAX_SEND_PER_RUN}. Parando envios neste ciclo.")
                         break
 
             if sent >= MAX_SEND_PER_RUN:
@@ -239,13 +296,12 @@ def main():
 
         except Exception as e:
             feed_fail += 1
-            log(f"[ERRO] {source} | query={q} | {e}")
+            log(f"[ERRO] {source} | {e}")
             continue
 
-    # guarda histórico (pra não crescer infinito)
-    # ids e links: manter “memória” grande o suficiente para não repetir, mas sem explodir
-    state["seen_ids"] = (list(seen_ids) + new_ids)[-800:]
-    state["seen_links"] = (list(seen_links) + new_links)[-1200:]
+    # memória: manter um histórico razoável
+    state["seen_ids"] = (list(seen_ids) + new_ids)[-1200:]
+    state["seen_links"] = (list(seen_links) + new_links)[-2000:]
     save_state(state)
 
     log(f"Finalizando. enviados={sent} novos_ids={len(new_ids)} novos_links={len(new_links)} feeds_ok={feed_ok} feeds_erro={feed_fail}")
