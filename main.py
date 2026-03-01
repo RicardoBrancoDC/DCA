@@ -4,7 +4,7 @@ import time
 import requests
 import feedparser
 from datetime import datetime, timezone, timedelta
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit, urlunsplit, parse_qsl, urlencode
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_TO")
@@ -16,11 +16,13 @@ MAX_ENTRY_AGE_HOURS = int(os.getenv("MAX_ENTRY_AGE_HOURS", "72"))
 MAX_SEND_PER_RUN = int(os.getenv("MAX_SEND_PER_RUN", "30"))
 SLEEP_SECONDS = float(os.getenv("SLEEP_SECONDS", "1.0"))
 
+# quantos itens ler por feed (mesmo que não mande todos, isso aumenta chance de achar relevantes)
+MAX_ENTRIES_PER_FEED = int(os.getenv("MAX_ENTRIES_PER_FEED", "50"))
+
 # Prefixo das mensagens, para ficar com cara de plantão (CGMA / SEDEC etc)
 BOT_PREFIX = os.getenv("BOT_PREFIX", "CGMA").strip()
 
 # Termos explícitos do sistema (quando a matéria é sobre DCA / Defesa Civil Alerta / alertas no celular)
-# Ideia: pegar tanto o jeito “oficial” quanto o jeito “jornalístico” de falar do assunto.
 EXPLICIT_PHRASES = [
     # nomes oficiais e variações
     "defesa civil alerta",
@@ -31,7 +33,7 @@ EXPLICIT_PHRASES = [
 
     # como a imprensa costuma escrever
     "alerta no celular",
-    "alerta no telemóvel",  # raríssimo, mas não custa
+    "alerta no telemóvel",
     "alerta por celular",
     "alerta via celular",
     "alerta no smartphone",
@@ -41,7 +43,7 @@ EXPLICIT_PHRASES = [
     "alerta de emergência",
     "alerta de emergência no celular",
 
-    # termos de contexto tecnológico que aparecem em matéria
+    # termos de contexto tecnológico
     "alerta 4g",
     "alerta 5g",
     "alerta por antena",
@@ -50,8 +52,7 @@ EXPLICIT_PHRASES = [
     "alerta em massa",
 ]
 
-# "DCA" sozinho dá ruído (dca pode ser sigla de muita coisa). Exigir contexto forte.
-# Dica: aqui vale incluir também operadoras e palavras de regulação, porque aparecem em reportagem.
+# "DCA" sozinho dá ruído (pode ser sigla de muita coisa). Exigir contexto forte.
 DCA_CONTEXT_TERMS = [
     # instituições e programa
     "defesa civil",
@@ -88,7 +89,6 @@ DCA_CONTEXT_TERMS = [
 ]
 
 # Gatilhos de severidade (prioridade) para plantão
-# Aqui eu juntaria impacto humano + resposta/gravidade + danos típicos, que são bem comuns em manchete.
 SEVERITY_TRIGGERS = [
     # vítimas
     "morto", "mortos", "morte",
@@ -119,7 +119,6 @@ SEVERITY_TRIGGERS = [
 ]
 
 # Tags de ocorrência para ajudar o plantão a bater o olho
-# Mantive as suas e acrescentei uns sinônimos que aparecem bastante em notícia.
 EVENT_TAGS = {
     "ALAGAMENTO": ["alagamento", "alagamentos", "ruas alagadas", "alagou"],
     "INUNDACAO": [
@@ -140,7 +139,6 @@ EVENT_TAGS = {
 }
 
 # Buscas principais (Google News + Reddit)
-# Aqui a ideia é: manter as “oficiais”, e somar as “jornalísticas”, para aumentar cobertura.
 SEARCH_QUERIES = [
     # repercussão do sistema (oficial)
     '"Defesa Civil Alerta"',
@@ -166,6 +164,11 @@ SEARCH_QUERIES = [
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; cgma-monitor/1.0; +https://github.com/RicardoBrancoDC/DCA)"
+}
+
+TRACKING_PARAMS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "gclid", "fbclid", "igshid"
 }
 
 def log(msg: str):
@@ -205,22 +208,48 @@ def send_telegram(text: str):
 def norm(s: str) -> str:
     return (s or "").strip().lower()
 
-def is_relevant(title: str, summary: str) -> bool:
+def normalize_link(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url)
+        q = [
+            (k, v) for (k, v) in parse_qsl(parts.query, keep_blank_values=True)
+            if k.lower() not in TRACKING_PARAMS
+        ]
+        query = urlencode(q, doseq=True)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
+    except Exception:
+        return url
+
+def is_system_topic(title: str, summary: str) -> bool:
     blob = f"{norm(title)} {norm(summary)}"
 
-    # 1) pegou termo explícito do sistema, ok
     if any(p in blob for p in EXPLICIT_PHRASES):
         return True
 
-    # 2) se vier "dca", exigir contexto
     has_dca = (" dca" in f" {blob}") or blob.startswith("dca")
     if has_dca:
         return any(ctx in blob for ctx in DCA_CONTEXT_TERMS)
 
-    # 3) se bater em termos de ocorrência, ok também
-    for words in EVENT_TAGS.values():
-        if any(w in blob for w in words):
-            return True
+    return False
+
+def is_occurrence_topic(title: str, summary: str) -> bool:
+    blob = f"{norm(title)} {norm(summary)}"
+    return any(w in blob for words in EVENT_TAGS.values() for w in words)
+
+def is_impact_topic(title: str, summary: str) -> bool:
+    blob = f"{norm(title)} {norm(summary)}"
+    return any(t in blob for t in SEVERITY_TRIGGERS)
+
+def is_relevant(title: str, summary: str) -> bool:
+    # sistema: pega quase tudo, porque você quer repercussão
+    if is_system_topic(title, summary):
+        return True
+
+    # ocorrência: exigir impacto para não virar boletim genérico
+    if is_occurrence_topic(title, summary) and is_impact_topic(title, summary):
+        return True
 
     return False
 
@@ -231,11 +260,21 @@ def classify_tags(title: str, summary: str):
     if any(t in blob for t in SEVERITY_TRIGGERS):
         tags.append("PRIO")
 
+    if is_system_topic(title, summary):
+        tags.append("SISTEMA")
+
     for tag, words in EVENT_TAGS.items():
         if any(w in blob for w in words):
             tags.append(tag)
 
-    return tags
+    # remover duplicatas mantendo ordem
+    seen = set()
+    out = []
+    for t in tags:
+        if t not in seen:
+            out.append(t)
+            seen.add(t)
+    return out
 
 def entry_datetime_utc(entry):
     t = entry.get("published_parsed") or entry.get("updated_parsed")
@@ -250,7 +289,6 @@ def stable_id(entry) -> str:
     return entry.get("id") or entry.get("guid") or entry.get("link") or ""
 
 def label_source(source: str) -> str:
-    # gdelt conta como imprensa
     if source in ("google_news", "gdelt"):
         return "IMPRENSA"
     return "OPINIAO"
@@ -264,8 +302,7 @@ def reddit_search_rss(query: str) -> str:
     return f"https://www.reddit.com/search.rss?q={q}&sort=new"
 
 def gdelt_rss(gdelt_query: str) -> str:
-    # DOC API em RSS só funciona no modo ArtList
-    # timespan=24h garante recorte curto; e ainda fazemos checagem de data pelo RSS
+    # Alinhando timespan com a janela do script
     q = quote_plus(gdelt_query)
     return (
         "https://api.gdeltproject.org/api/v2/doc/doc"
@@ -273,8 +310,8 @@ def gdelt_rss(gdelt_query: str) -> str:
         "&mode=ArtList"
         "&format=rss"
         "&sort=DateDesc"
-        "&maxrecords=50"
-        "&timespan=24h"
+        "&maxrecords=100"
+        f"&timespan={MAX_ENTRY_AGE_HOURS}h"
     )
 
 def build_feeds():
@@ -285,19 +322,18 @@ def build_feeds():
         feeds.append(("google_news", q, google_news_rss(q)))
         feeds.append(("reddit", q, reddit_search_rss(q)))
 
-    # Camada 2: GDELT, com poucas queries bem “largas” (pra não ficar chamando demais)
-    # Importante: restringindo para imprensa do Brasil usando sourcecountry
+    # Camada 2: GDELT, com poucas queries “largas”
     gdelt_queries = [
-        # repercussão do sistema
         '(("Defesa Civil Alerta" OR "cell broadcast" OR DCA) sourcecountry:brazil)',
 
-        # ocorrências com impacto, misturando português e inglês, porque a GDELT trabalha muito com tradução
         '((alagamento OR enchente OR inundacao OR inundação OR transbordamento OR flood OR flooding OR inundation) '
-        '(vitimas OR vítimas OR mortos OR feridos OR desaparecidos OR victims OR dead OR deaths OR injured OR missing) '
+        '(vitimas OR vítimas OR mortos OR feridos OR desaparecidos OR victims OR dead OR deaths OR injured OR missing '
+        'OR desabrigados OR desalojados OR evacuacao OR evacuação OR interdicao OR interdição) '
         'sourcecountry:brazil)',
 
-        '((deslizamento OR desmoronamento OR "queda de barreira" OR soterramento OR landslide) '
-        '(vitimas OR vítimas OR mortos OR feridos OR desaparecidos OR victims OR dead OR deaths OR injured OR missing) '
+        '((deslizamento OR desmoronamento OR "queda de barreira" OR soterramento OR landslide OR desabamento) '
+        '(vitimas OR vítimas OR mortos OR feridos OR desaparecidos OR victims OR dead OR deaths OR injured OR missing '
+        'OR desabrigados OR desalojados OR evacuacao OR evacuação OR interdicao OR interdição) '
         'sourcecountry:brazil)',
     ]
 
@@ -313,7 +349,10 @@ def main():
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_ENTRY_AGE_HOURS)
 
-    log(f"Iniciando. seen_ids={len(seen_ids)} seen_links={len(seen_links)} janela_horas={MAX_ENTRY_AGE_HOURS} max_send={MAX_SEND_PER_RUN}")
+    log(
+        f"Iniciando. seen_ids={len(seen_ids)} seen_links={len(seen_links)} "
+        f"janela_horas={MAX_ENTRY_AGE_HOURS} max_send={MAX_SEND_PER_RUN} entries_feed={MAX_ENTRIES_PER_FEED}"
+    )
 
     feeds = build_feeds()
 
@@ -334,7 +373,7 @@ def main():
             feed_ok += 1
             log(f"[OK] {source} | itens={len(parsed.entries)} | query={q[:80]}")
 
-            for entry in parsed.entries[:10]:
+            for entry in parsed.entries[:MAX_ENTRIES_PER_FEED]:
                 eid = stable_id(entry)
                 if not eid:
                     continue
@@ -343,12 +382,12 @@ def main():
 
                 title = entry.get("title", "")
                 summary = entry.get("summary", "") or entry.get("description", "")
-                link = entry.get("link", "")
+                link = normalize_link(entry.get("link", ""))
 
                 # marca id como visto, mesmo que não mande
                 new_ids.append(eid)
 
-                # janela: se não tiver data confiável, não manda (evita “coisa velha” escapando)
+                # janela: se não tiver data confiável, não manda
                 dt = entry_datetime_utc(entry)
                 if dt is None or dt < cutoff:
                     continue
