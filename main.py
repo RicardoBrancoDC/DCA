@@ -20,7 +20,7 @@ SLEEP_SECONDS = float(os.getenv("SLEEP_SECONDS", "1.0"))
 MAX_ENTRIES_PER_FEED = int(os.getenv("MAX_ENTRIES_PER_FEED", "50"))
 
 # Prefixo das mensagens, para ficar com cara de plantão (CGMA / SEDEC etc)
-BOT_PREFIX = os.getenv("BOT_PREFIX", "CGMA").strip()
+BOT_PREFIX = os.getenv("BOT_PREFIX", "CISDA_CGMA").strip()
 
 # Termos explícitos do sistema (quando a matéria é sobre DCA / Defesa Civil Alerta / alertas no celular)
 EXPLICIT_PHRASES = [
