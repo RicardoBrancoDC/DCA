@@ -12,60 +12,137 @@ CHAT_ID = os.getenv("TELEGRAM_TO")
 STATE_FILE = "state.json"
 
 # Ajustáveis por Variables do GitHub Actions (Settings > Secrets and variables > Actions > Variables)
-MAX_ENTRY_AGE_HOURS = int(os.getenv("MAX_ENTRY_AGE_HOURS", "24"))
-MAX_SEND_PER_RUN = int(os.getenv("MAX_SEND_PER_RUN", "8"))
+MAX_ENTRY_AGE_HOURS = int(os.getenv("MAX_ENTRY_AGE_HOURS", "72"))
+MAX_SEND_PER_RUN = int(os.getenv("MAX_SEND_PER_RUN", "30"))
 SLEEP_SECONDS = float(os.getenv("SLEEP_SECONDS", "1.0"))
 
 # Prefixo das mensagens, para ficar com cara de plantão (CGMA / SEDEC etc)
 BOT_PREFIX = os.getenv("BOT_PREFIX", "CGMA").strip()
 
-# Termos explícitos do sistema (quando a matéria é sobre o DCA / Defesa Civil Alerta)
+# Termos explícitos do sistema (quando a matéria é sobre DCA / Defesa Civil Alerta / alertas no celular)
+# Ideia: pegar tanto o jeito “oficial” quanto o jeito “jornalístico” de falar do assunto.
 EXPLICIT_PHRASES = [
+    # nomes oficiais e variações
     "defesa civil alerta",
-    "defesa civil alerta (dca)",
+    "defesa civil alerta dca",
+    "dca defesa civil alerta",
     "cell broadcast",
-    "defesa civil alerta cell broadcast",
+    "cellbroadcast",
+
+    # como a imprensa costuma escrever
+    "alerta no celular",
+    "alerta no telemóvel",  # raríssimo, mas não custa
+    "alerta por celular",
+    "alerta via celular",
+    "alerta no smartphone",
+    "mensagem de emergência",
+    "mensagem de alerta",
+    "mensagem de alerta no celular",
+    "alerta de emergência",
+    "alerta de emergência no celular",
+
+    # termos de contexto tecnológico que aparecem em matéria
+    "alerta 4g",
+    "alerta 5g",
+    "alerta por antena",
+    "alerta por área",
+    "alerta geolocalizado",
+    "alerta em massa",
 ]
 
-# "DCA" sozinho dá ruído. Exigir contexto.
+# "DCA" sozinho dá ruído (dca pode ser sigla de muita coisa). Exigir contexto forte.
+# Dica: aqui vale incluir também operadoras e palavras de regulação, porque aparecem em reportagem.
 DCA_CONTEXT_TERMS = [
+    # instituições e programa
     "defesa civil",
     "midr",
+    "ministério da integração",
     "cenad",
-    "alerta",
+    "sedec",
+    "governo federal",
+
+    # tecnologia e regulação
     "cell broadcast",
+    "cellbroadcast",
     "anatel",
+    "operadora",
+    "operadoras",
+    "claro",
+    "vivo",
+    "tim",
+    "oi",
+    "4g",
+    "5g",
+    "sms",
+
+    # jeito jornalístico
+    "alerta no celular",
+    "alerta por celular",
+    "alerta via celular",
     "mensagem de emergência",
     "alerta de emergência",
-    "defesa civil alerta",
+    "mensagem de alerta",
+    "alerta em massa",
+    "alerta por área",
+    "alerta geolocalizado",
 ]
 
-# Gatilhos de severidade (prioridade)
+# Gatilhos de severidade (prioridade) para plantão
+# Aqui eu juntaria impacto humano + resposta/gravidade + danos típicos, que são bem comuns em manchete.
 SEVERITY_TRIGGERS = [
+    # vítimas
     "morto", "mortos", "morte",
     "vítima", "vítimas", "vitima", "vitimas",
     "ferido", "feridos",
     "desaparecido", "desaparecidos",
     "soterrado", "soterrados",
+
+    # afetados
+    "desalojado", "desalojados",
+    "desabrigado", "desabrigados",
+    "ilhado", "ilhados",
+
+    # resposta e situação oficial
     "tragédia", "tragedia",
     "calamidade", "estado de calamidade",
     "emergência", "emergencia",
+    "decretou emergência", "decretou emergencia",
+    "resgate", "buscas",
+
+    # danos e medidas
     "interdição", "interdicao",
     "evacuação", "evacuacao",
+    "desabamento", "desmoronamento",
+    "destruiu", "destruída", "destruida",
+    "ponte caiu", "queda de ponte",
+    "rodovia interditada", "estrada interditada",
 ]
 
 # Tags de ocorrência para ajudar o plantão a bater o olho
+# Mantive as suas e acrescentei uns sinônimos que aparecem bastante em notícia.
 EVENT_TAGS = {
-    "ALAGAMENTO": ["alagamento", "alagamentos"],
-    "INUNDACAO": ["inundação", "inundacao", "enchente", "enchentes", "transbordamento", "inundar", "inundou"],
-    "ENXURRADA": ["enxurrada", "enxurradas"],
-    "DESLIZAMENTO": ["deslizamento", "deslizamentos", "desmoronamento", "desabamento", "queda de barreira", "soterramento", "desbarrancamento"],
-    "CHUVA_FORTE": ["chuva intensa", "chuva forte", "temporal", "tempestade", "chuvas fortes"],
+    "ALAGAMENTO": ["alagamento", "alagamentos", "ruas alagadas", "alagou"],
+    "INUNDACAO": [
+        "inundação", "inundacao", "enchente", "enchentes",
+        "transbordamento", "rio transbordou", "inundar", "inundou"
+    ],
+    "ENXURRADA": ["enxurrada", "enxurradas", "cabeça d'água", "cabeca d'agua"],
+    "DESLIZAMENTO": [
+        "deslizamento", "deslizamentos", "desmoronamento", "desabamento",
+        "queda de barreira", "soterramento", "desbarrancamento", "escorregamento"
+    ],
+    "CHUVA_FORTE": [
+        "chuva intensa", "chuva forte", "temporal", "tempestade",
+        "chuvas fortes", "toró", "tromba d'água", "tromba d'agua"
+    ],
+    "VENDAVAL": ["vendaval", "rajadas", "vento forte"],
+    "RAYOS_GRANIZO": ["raio", "raios", "granizo", "queda de granizo"],
 }
 
 # Buscas principais (Google News + Reddit)
+# Aqui a ideia é: manter as “oficiais”, e somar as “jornalísticas”, para aumentar cobertura.
 SEARCH_QUERIES = [
-    # repercussão do sistema
+    # repercussão do sistema (oficial)
     '"Defesa Civil Alerta"',
     '"Defesa Civil Alerta" MIDR',
     '"DCA" "Defesa Civil"',
@@ -73,9 +150,18 @@ SEARCH_QUERIES = [
     '"Defesa Civil Alerta" "cell broadcast"',
     '"Defesa Civil Alerta" Anatel',
 
-    # ocorrências com possível impacto (plantão)
-    '(alagamento OR inundação OR enchente OR enxurrada OR transbordamento) (vítimas OR mortos OR feridos OR desaparecidos)',
-    '(deslizamento OR desmoronamento OR "queda de barreira" OR soterramento) (vítimas OR mortos OR feridos OR desaparecidos)',
+    # repercussão do sistema (jeito imprensa)
+    '("alerta" OR "mensagem") ("no celular" OR "por celular" OR "via celular" OR smartphone) ("defesa civil" OR MIDR OR CENAD)',
+    '"mensagem de emergência" "defesa civil"',
+    '("cell broadcast" OR "cellbroadcast") (Brasil OR Anatel OR operadoras)',
+    '("alerta no celular" OR "alerta por celular") (anatel OR 4g OR 5g OR operadoras)',
+
+    # ocorrências com possível impacto (plantão) - ampliar “impacto” além de vítimas
+    '(alagamento OR inundação OR inundacao OR enchente OR enxurrada OR transbordamento) '
+    '(vítimas OR vitimas OR mortos OR feridos OR desaparecidos OR desabrigados OR desalojados OR interdição OR interdicao OR evacuação OR evacuacao)',
+
+    '(deslizamento OR desmoronamento OR "queda de barreira" OR soterramento OR desabamento) '
+    '(vítimas OR vitimas OR mortos OR feridos OR desaparecidos OR desabrigados OR desalojados OR interdição OR interdicao OR evacuação OR evacuacao)',
 ]
 
 HEADERS = {
