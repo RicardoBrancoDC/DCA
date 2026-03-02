@@ -16,11 +16,11 @@ MAX_ENTRY_AGE_HOURS = int(os.getenv("MAX_ENTRY_AGE_HOURS", "72"))
 MAX_SEND_PER_RUN = int(os.getenv("MAX_SEND_PER_RUN", "30"))
 SLEEP_SECONDS = float(os.getenv("SLEEP_SECONDS", "1.0"))
 
-# quantos itens ler por feed (mesmo que não mande todos, isso aumenta chance de achar relevantes)
+# Quantos itens ler por feed (mesmo que não mande todos, isso aumenta chance de achar relevantes)
 MAX_ENTRIES_PER_FEED = int(os.getenv("MAX_ENTRIES_PER_FEED", "50"))
 
 # Prefixo das mensagens, para ficar com cara de plantão (CGMA / SEDEC etc)
-BOT_PREFIX = os.getenv("BOT_PREFIX", "CISDA_CGMA").strip()
+BOT_PREFIX = os.getenv("BOT_PREFIX", "CGMA").strip()
 
 # Termos explícitos do sistema (quando a matéria é sobre DCA / Defesa Civil Alerta / alertas no celular)
 EXPLICIT_PHRASES = [
@@ -139,7 +139,8 @@ EVENT_TAGS = {
 }
 
 # Buscas principais (Google News + Reddit)
-SEARCH_QUERIES = [
+# OBS: Reddit vai ser consultado só para as queries do SISTEMA (abaixo).
+SYSTEM_QUERIES = [
     # repercussão do sistema (oficial)
     '"Defesa Civil Alerta"',
     '"Defesa Civil Alerta" MIDR',
@@ -153,8 +154,10 @@ SEARCH_QUERIES = [
     '"mensagem de emergência" "defesa civil"',
     '("cell broadcast" OR "cellbroadcast") (Brasil OR Anatel OR operadoras)',
     '("alerta no celular" OR "alerta por celular") (anatel OR 4g OR 5g OR operadoras)',
+]
 
-    # ocorrências com possível impacto (plantão) - ampliar “impacto” além de vítimas
+OCCURRENCE_QUERIES = [
+    # ocorrências com possível impacto (plantão)
     '(alagamento OR inundação OR inundacao OR enchente OR enxurrada OR transbordamento) '
     '(vítimas OR vitimas OR mortos OR feridos OR desaparecidos OR desabrigados OR desalojados OR interdição OR interdicao OR evacuação OR evacuacao)',
 
@@ -242,12 +245,16 @@ def is_impact_topic(title: str, summary: str) -> bool:
     blob = f"{norm(title)} {norm(summary)}"
     return any(t in blob for t in SEVERITY_TRIGGERS)
 
-def is_relevant(title: str, summary: str) -> bool:
-    # sistema: pega quase tudo, porque você quer repercussão
+def is_relevant(title: str, summary: str, source: str) -> bool:
+    # Reddit: só aceitamos tema do SISTEMA (evita "enxurrada de críticas", etc.)
+    if source == "reddit":
+        return is_system_topic(title, summary)
+
+    # imprensa: sistema passa sempre
     if is_system_topic(title, summary):
         return True
 
-    # ocorrência: exigir impacto para não virar boletim genérico
+    # imprensa: ocorrência só com impacto
     if is_occurrence_topic(title, summary) and is_impact_topic(title, summary):
         return True
 
@@ -317,12 +324,17 @@ def gdelt_rss(gdelt_query: str) -> str:
 def build_feeds():
     feeds = []
 
-    # Camada 1: Google News + Reddit, para todas as queries
-    for q in SEARCH_QUERIES:
+    # Google News para tudo (sistema + ocorrência)
+    for q in SYSTEM_QUERIES:
         feeds.append(("google_news", q, google_news_rss(q)))
+    for q in OCCURRENCE_QUERIES:
+        feeds.append(("google_news", q, google_news_rss(q)))
+
+    # Reddit só para SISTEMA
+    for q in SYSTEM_QUERIES:
         feeds.append(("reddit", q, reddit_search_rss(q)))
 
-    # Camada 2: GDELT, com poucas queries “largas”
+    # GDELT com poucas queries “largas”
     gdelt_queries = [
         '(("Defesa Civil Alerta" OR "cell broadcast" OR DCA) sourcecountry:brazil)',
 
@@ -384,9 +396,6 @@ def main():
                 summary = entry.get("summary", "") or entry.get("description", "")
                 link = normalize_link(entry.get("link", ""))
 
-                # marca id como visto, mesmo que não mande
-                new_ids.append(eid)
-
                 # janela: se não tiver data confiável, não manda
                 dt = entry_datetime_utc(entry)
                 if dt is None or dt < cutoff:
@@ -398,7 +407,10 @@ def main():
                 if link in seen_links or link in new_links or link in sent_links_this_run:
                     continue
 
-                if is_relevant(title, summary):
+                # agora sim, marca id como visto (evita "queimar" item sem data/link)
+                new_ids.append(eid)
+
+                if is_relevant(title, summary, source):
                     src = label_source(source)
                     tags = classify_tags(title, summary)
                     tag_txt = " ".join([f"[{t}]" for t in tags]) if tags else ""
