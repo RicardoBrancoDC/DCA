@@ -1,3 +1,2 @@
-init
 # DCA
-Monitoramento Alertas DCA
+Monitoramento de Noticias de Defesa Civil
